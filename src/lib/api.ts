@@ -2,6 +2,7 @@ import type {
   AgentsResponse,
   HealthResponse,
   PlanResponse,
+  PlanStreamEvent,
   VersionResponse,
   WorkflowStepsResponse,
 } from '../types/api'
@@ -68,4 +69,75 @@ export async function runPlan(userInput: string): Promise<PlanResponse> {
     }),
   })
   return parseJsonOrThrow(res) as Promise<PlanResponse>
+}
+
+/**
+ * Streamed planning: SSE `data:` lines with step progress, then a `complete` event carrying PlanResponse.
+ */
+export async function runPlanStream(
+  userInput: string,
+  onEvent: (event: PlanStreamEvent) => void,
+): Promise<PlanResponse> {
+  const res = await fetch(`${getApiBase()}/api/v1/plan/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    body: JSON.stringify({
+      user_input: userInput,
+      fail_fast: true,
+      print_summary: false,
+    }),
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    let body: unknown
+    try {
+      body = text ? JSON.parse(text) : null
+    } catch {
+      body = null
+    }
+    const msg =
+      typeof body === 'object' && body !== null && 'detail' in body
+        ? JSON.stringify((body as { detail: unknown }).detail)
+        : text.slice(0, 200)
+    throw new Error(`HTTP ${res.status}: ${msg}`)
+  }
+  const reader = res.body?.getReader()
+  if (!reader) {
+    throw new Error('No response body from plan stream')
+  }
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let final: PlanResponse | null = null
+  while (true) {
+    const { done, value } = await reader.read()
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done })
+    const chunks = buffer.split('\n\n')
+    buffer = chunks.pop() ?? ''
+    for (const chunk of chunks) {
+      for (const line of chunk.split('\n')) {
+        const trimmed = line.trim()
+        if (!trimmed.startsWith('data:')) continue
+        const jsonText = trimmed.slice(5).trim()
+        if (!jsonText) continue
+        let data: PlanStreamEvent
+        try {
+          data = JSON.parse(jsonText) as PlanStreamEvent
+        } catch {
+          throw new Error('Invalid JSON in plan stream')
+        }
+        onEvent(data)
+        if (data.type === 'complete') {
+          final = data.result
+        }
+        if (data.type === 'error') {
+          throw new Error(data.message)
+        }
+      }
+    }
+    if (done) break
+  }
+  if (!final) {
+    throw new Error('Stream ended without a complete result')
+  }
+  return final
 }

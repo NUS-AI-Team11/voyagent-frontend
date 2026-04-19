@@ -1,35 +1,24 @@
-:root {
-  --text: #0f172a;
-  --muted: #64748b;
-  --bg: #f8fafc;
-  --panel-bg: #ffffff;
-  --input-bg: #ffffff;
-  --border: #e2e8f0;
-  --code-bg: #f1f5f9;
-  --accent: #2563eb;
-  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
-  line-height: 1.5;
-  color: var(--text);
-  background: var(--bg);
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'DM Sans', ui-sans-serif, system-ui, sans-serif;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #f1f5f9;
-    --muted: #94a3b8;
-    --bg: #0f172a;
-    --panel-bg: #1e293b;
-    --input-bg: #0f172a;
-    --border: #334155;
-    --code-bg: #1e293b;
-    --accent: #3b82f6;
-  }
-}
-
-#root {
-  min-height: 100vh;
+html {
+  scroll-behavior: smooth;
 }
 
 body {
-  margin: 0;
+  @apply antialiased text-slate-800 bg-slate-50 font-sans;
+}
+
+.font-outfit {
+  font-family: 'Outfit', ui-sans-serif, system-ui, sans-serif;
+}
+
+.hero-mesh {
+  background:
+    radial-gradient(ellipse 90% 60% at 50% -30%, rgb(14 165 233 / 0.14), transparent),
+    radial-gradient(ellipse 70% 45% at 100% 0%, rgb(99 102 241 / 0.1), transparent),
+    radial-gradient(ellipse 55% 35% at 0% 15%, rgb(20 184 166 / 0.12), transparent);
 }
