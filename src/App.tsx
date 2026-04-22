@@ -165,6 +165,30 @@ type ItineraryDayCard = {
   note: string | null
 }
 
+type HandbookSummaryView = {
+  title: string
+  destination: string
+  budget: number
+  total_cost: number
+  budget_remaining: number
+  is_within_budget: boolean
+}
+
+type CostBreakdownView = {
+  accommodation: number
+  transportation: number
+  dining: number
+  attractions: number
+  shopping: number
+  miscellaneous: number
+  contingency: number
+  total: number
+}
+
+function numberOrNaN(value: unknown): number {
+  return typeof value === 'number' ? value : Number(value)
+}
+
 function formatActivityLine(act: Record<string, unknown>): string {
   const t = String(act.time ?? '').trim()
   const n = String(act.name ?? '').trim()
@@ -174,6 +198,10 @@ function formatActivityLine(act: Record<string, unknown>): string {
   if (loc && loc.toUpperCase() !== 'TBD') {
     const shortLoc = loc.length > 48 ? `${loc.slice(0, 45)}…` : loc
     s += ` — ${shortLoc}`
+  }
+  const transit = numberOrNaN(act.travel_minutes_from_previous)
+  if (Number.isFinite(transit) && transit > 0) {
+    s += ` (+${Math.round(transit)}m transit)`
   }
   return s
 }
@@ -202,7 +230,15 @@ function itineraryDayCardsFromApi(result: PlanResponse): ItineraryDayCard[] | nu
       let stayLine: string | null = null
       if (acc && typeof acc === 'object') {
         const name = String(acc.name ?? '').trim()
-        if (name && name.toUpperCase() !== 'TBD') stayLine = name
+        const address = String(acc.address ?? '').trim()
+        const nightlyCost = numberOrNaN(acc.cost_per_night)
+        const stayBits: string[] = []
+        if (name && name.toUpperCase() !== 'TBD') stayBits.push(name)
+        if (address && address.toUpperCase() !== 'TBD') stayBits.push(address)
+        if (Number.isFinite(nightlyCost) && nightlyCost > 0) {
+          stayBits.push(`$${nightlyCost.toLocaleString(undefined, { maximumFractionDigits: 0 })}/night`)
+        }
+        if (stayBits.length > 0) stayLine = stayBits.join(' · ')
       }
       const noteRaw = String(day.notes ?? '').trim()
       const note = noteRaw && noteRaw.toUpperCase() !== 'TBD' ? noteRaw : null
@@ -219,6 +255,69 @@ function itineraryDayCardsFromApi(result: PlanResponse): ItineraryDayCard[] | nu
     })
   }
   return itineraryDayCardsFromNarrative(result.itinerary_narrative)
+}
+
+function summaryFromResult(result: PlanResponse): HandbookSummaryView | null {
+  const summary = result.final_handbook_summary as Record<string, unknown> | null | undefined
+  if (summary && typeof summary === 'object') {
+    const budget = numberOrNaN(summary.budget)
+    const totalCost = numberOrNaN(summary.total_cost)
+    const remaining = numberOrNaN(summary.budget_remaining)
+    const explicitWithin = summary.is_within_budget
+    const within =
+      typeof explicitWithin === 'boolean'
+        ? explicitWithin
+        : Number.isFinite(remaining)
+          ? remaining >= 0
+          : Number.isFinite(budget) && Number.isFinite(totalCost)
+            ? totalCost <= budget
+            : false
+    return {
+      title: String(summary.title ?? 'Your handbook'),
+      destination: String(summary.destination ?? ''),
+      budget,
+      total_cost: totalCost,
+      budget_remaining: remaining,
+      is_within_budget: within,
+    }
+  }
+
+  const handbook = result.final_handbook as Record<string, unknown> | null | undefined
+  if (!handbook || typeof handbook !== 'object') return null
+  const cb = (handbook.cost_breakdown as Record<string, unknown> | undefined) ?? {}
+  const budget = numberOrNaN(handbook.budget)
+  const total = numberOrNaN(cb.total)
+  const remaining = numberOrNaN(handbook.budget_remaining)
+  return {
+    title: String(handbook.title ?? 'Your handbook'),
+    destination: String(handbook.destination ?? ''),
+    budget,
+    total_cost: total,
+    budget_remaining: remaining,
+    is_within_budget: Number.isFinite(remaining)
+      ? remaining >= 0
+      : Number.isFinite(total) && Number.isFinite(budget)
+        ? total <= budget
+        : false,
+  }
+}
+
+function costBreakdownFromResult(result: PlanResponse): CostBreakdownView | null {
+  const handbook = result.final_handbook as Record<string, unknown> | null | undefined
+  if (!handbook || typeof handbook !== 'object') return null
+  const cb = handbook.cost_breakdown as Record<string, unknown> | undefined
+  if (!cb || typeof cb !== 'object') return null
+
+  return {
+    accommodation: numberOrNaN(cb.accommodation),
+    transportation: numberOrNaN(cb.transportation),
+    dining: numberOrNaN(cb.dining),
+    attractions: numberOrNaN(cb.attractions),
+    shopping: numberOrNaN(cb.shopping),
+    miscellaneous: numberOrNaN(cb.miscellaneous),
+    contingency: numberOrNaN(cb.contingency),
+    total: numberOrNaN(cb.total),
+  }
 }
 
 function itineraryDayCardsFromNarrative(nar: string | null | undefined): ItineraryDayCard[] | null {
@@ -365,13 +464,13 @@ function ItineraryDayAccordion({ days }: { days: ItineraryDayCard[] }) {
   )
 }
 
-function HandbookSummaryCard({ data }: { data: Record<string, unknown> }) {
-  const dest = String(data.destination ?? '—')
-  const title = String(data.title ?? 'Your handbook')
-  const budget = typeof data.budget === 'number' ? data.budget : Number(data.budget)
-  const total = typeof data.total_cost === 'number' ? data.total_cost : Number(data.total_cost)
-  const remaining = typeof data.budget_remaining === 'number' ? data.budget_remaining : Number(data.budget_remaining)
-  const within = Boolean(data.is_within_budget)
+function HandbookSummaryCard({ data }: { data: HandbookSummaryView }) {
+  const dest = data.destination || '—'
+  const title = data.title || 'Your handbook'
+  const budget = data.budget
+  const total = data.total_cost
+  const remaining = data.budget_remaining
+  const within = data.is_within_budget
 
   return (
     <div className="relative overflow-hidden rounded-2xl border border-teal-200/80 bg-gradient-to-br from-teal-50 via-white to-sky-50 p-6 shadow-lg shadow-teal-900/5">
@@ -403,8 +502,43 @@ function HandbookSummaryCard({ data }: { data: Record<string, unknown> }) {
   )
 }
 
+function CostBreakdownCard({ breakdown }: { breakdown: CostBreakdownView }) {
+  const rows = [
+    ['Accommodation', breakdown.accommodation],
+    ['Transportation', breakdown.transportation],
+    ['Dining', breakdown.dining],
+    ['Attractions', breakdown.attractions],
+    ['Shopping', breakdown.shopping],
+    ['Miscellaneous', breakdown.miscellaneous],
+    ['Contingency', breakdown.contingency],
+  ] as const
+
+  return (
+    <section className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-sm ring-1 ring-slate-100">
+      <h4 className="font-outfit text-sm font-semibold uppercase tracking-wider text-slate-500">Cost breakdown</h4>
+      <dl className="mt-3 space-y-2">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex items-center justify-between text-sm">
+            <dt className="text-slate-600">{label}</dt>
+            <dd className="font-medium text-slate-900">
+              {Number.isFinite(value) ? `$${value.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '—'}
+            </dd>
+          </div>
+        ))}
+      </dl>
+      <div className="mt-3 border-t border-slate-100 pt-2 flex items-center justify-between text-sm">
+        <span className="font-semibold text-slate-700">Total</span>
+        <span className="font-semibold text-slate-900">
+          {Number.isFinite(breakdown.total) ? `$${breakdown.total.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '—'}
+        </span>
+      </div>
+    </section>
+  )
+}
+
 function HandbookCardView({ result }: { result: PlanResponse }) {
-  const summary = result.final_handbook_summary as Record<string, unknown> | null | undefined
+  const summary = useMemo(() => summaryFromResult(result), [result])
+  const breakdown = useMemo(() => costBreakdownFromResult(result), [result])
   const dayCards = useMemo(() => itineraryDayCardsFromApi(result), [result])
   const spots = useMemo(() => spotsFromPlan(result.spot_list), [result.spot_list])
   const dining = useMemo(() => diningFromPlan(result.dining_list), [result.dining_list])
@@ -455,7 +589,7 @@ function HandbookCardView({ result }: { result: PlanResponse }) {
       <div className="space-y-8 px-6 py-8 sm:px-8">
         <div className="grid gap-8 xl:grid-cols-12">
           <div className="space-y-8 xl:col-span-7">
-            {summary && Object.keys(summary).length > 0 && <HandbookSummaryCard data={summary} />}
+            {summary && <HandbookSummaryCard data={summary} />}
 
             {dayCards && dayCards.length > 0 && (
               <section>
@@ -531,6 +665,8 @@ function HandbookCardView({ result }: { result: PlanResponse }) {
                 </ul>
               </section>
             )}
+
+            {breakdown && <CostBreakdownCard breakdown={breakdown} />}
 
             {(tips.length > 0 || packing.length > 0) && (
               <section className="grid gap-6 sm:grid-cols-2 xl:grid-cols-1">
