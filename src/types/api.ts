@@ -5,6 +5,29 @@
 
 export type JsonObject = Record<string, unknown>
 
+export interface AgentQualityCheck {
+  attempt: number
+  ok: boolean
+  reason: string
+}
+
+export interface AgentQualityReport {
+  stage?: string
+  attempts?: number
+  passed?: boolean
+  final_reason?: string
+  checks?: AgentQualityCheck[]
+}
+
+export interface AgentRunMeta {
+  agent: string
+  status: string
+  elapsed_ms: number
+  timestamp: string
+  error?: string
+  quality?: AgentQualityReport | null
+}
+
 export interface PlanResponse {
   ok: boolean
   travel_profile: JsonObject | null
@@ -16,7 +39,9 @@ export interface PlanResponse {
   final_handbook_summary: JsonObject | null
   errors: string[]
   warnings: string[]
-  metadata: JsonObject
+  metadata: JsonObject & {
+    agent_runs?: AgentRunMeta[]
+  }
 }
 
 export type PlanStreamEvent =

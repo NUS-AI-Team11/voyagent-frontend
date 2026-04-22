@@ -1,7 +1,7 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { fetchAgents, fetchHealth, fetchVersion, fetchWorkflowSteps, getApiBase, runPlanStream } from './lib/api'
-import type { AgentInfoItem, PlanResponse, WorkflowStepItem } from './types/api'
+import type { AgentInfoItem, AgentRunMeta, PlanResponse, WorkflowStepItem } from './types/api'
 
 function Spinner({ className = '' }: { className?: string }) {
   return (
@@ -705,6 +705,9 @@ function HandbookCardView({ result }: { result: PlanResponse }) {
 }
 
 function ResultView({ result }: { result: PlanResponse }) {
+  const agentRuns = ((result.metadata?.agent_runs as AgentRunMeta[] | undefined) ?? []).filter(
+    (r) => r && typeof r === 'object',
+  )
   return (
     <div className="space-y-5">
       <div
@@ -741,6 +744,34 @@ function ResultView({ result }: { result: PlanResponse }) {
       )}
 
       <HandbookCardView result={result} />
+
+      {agentRuns.length > 0 && (
+        <details className="group rounded-2xl border border-slate-200/90 bg-white shadow-sm">
+          <summary className="cursor-pointer list-none px-5 py-4 font-medium text-slate-800 marker:content-none [&::-webkit-details-marker]:hidden">
+            <span className="flex items-center justify-between gap-2">
+              Agent quality checklist
+              <span className="text-xs font-normal text-slate-500 group-open:rotate-180 transition-transform">▼</span>
+            </span>
+          </summary>
+          <div className="space-y-3 border-t border-slate-100 px-5 pb-4 pt-3">
+            {agentRuns.map((run, idx) => (
+              <div key={`${run.agent}-${idx}`} className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
+                <p className="text-sm font-medium text-slate-900">
+                  {run.agent} · {run.status} · {Math.round(Number(run.elapsed_ms || 0))} ms
+                </p>
+                {run.quality ? (
+                  <p className="mt-1 text-xs text-slate-600">
+                    stage={run.quality.stage || 'n/a'} | attempts={run.quality.attempts ?? 'n/a'} | passed=
+                    {String(Boolean(run.quality.passed))} | reason={run.quality.final_reason || 'n/a'}
+                  </p>
+                ) : (
+                  <p className="mt-1 text-xs text-slate-500">No quality report provided by this agent.</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
 
       <details className="group rounded-2xl border border-slate-200/90 bg-slate-50/50 shadow-sm open:bg-white">
         <summary className="cursor-pointer list-none px-5 py-4 font-medium text-slate-800 marker:content-none [&::-webkit-details-marker]:hidden">
