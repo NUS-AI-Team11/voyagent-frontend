@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react'
-import { fetchAgents, fetchHealth, fetchVersion, fetchWorkflowSteps, runPlanStream } from './lib/api'
+import { fetchAgents, fetchHealth, fetchVersion, fetchWorkflowSteps, getApiBase, runPlanStream } from './lib/api'
 import type { AgentInfoItem, PlanResponse, WorkflowStepItem } from './types/api'
 
 function Spinner({ className = '' }: { className?: string }) {
@@ -765,8 +765,25 @@ function ResultView({ result }: { result: PlanResponse }) {
 export default function App() {
   const [input, setInput] = useState('')
   const [pipe, setPipe] = useState({ doneIdx: 0, runningIdx: 0, label: '' })
+  const [lastErrorDetail, setLastErrorDetail] = useState('')
+  const [lastRequestAt, setLastRequestAt] = useState<string>('')
+  const [lastRequestApiBase, setLastRequestApiBase] = useState<string>('')
+  const [isBrowserOnline, setIsBrowserOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true,
+  )
   const [specialistsHelpOpen, setSpecialistsHelpOpen] = useState(false)
   const specialistsHelpBtnRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    const handleOnline = () => setIsBrowserOnline(true)
+    const handleOffline = () => setIsBrowserOnline(false)
+    window.addEventListener('online', handleOnline)
+    window.addEventListener('offline', handleOffline)
+    return () => {
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('offline', handleOffline)
+    }
+  }, [])
 
   const health = useQuery({ queryKey: ['health'], queryFn: fetchHealth })
   const version = useQuery({ queryKey: ['version'], queryFn: fetchVersion })
@@ -805,7 +822,11 @@ export default function App() {
         runningIdx: 0,
         label: '',
       })),
-    onError: () => setPipe((p) => ({ ...p, runningIdx: 0, label: '' })),
+    onError: (error) => {
+      setPipe((p) => ({ ...p, runningIdx: 0, label: '' }))
+      const detail = error instanceof Error ? error.message : String(error ?? 'Unknown error')
+      setLastErrorDetail(detail)
+    },
   })
 
   const canSubmit = input.trim().length > 0 && !plan.isPending
@@ -926,7 +947,16 @@ export default function App() {
                 <button
                   type="button"
                   disabled={!canSubmit}
-                  onClick={() => plan.mutate(input.trim())}
+                  onClick={() => {
+                    setLastErrorDetail('')
+                    setLastRequestAt(new Date().toISOString())
+                    try {
+                      setLastRequestApiBase(getApiBase())
+                    } catch {
+                      setLastRequestApiBase('(unresolved)')
+                    }
+                    plan.mutate(input.trim())
+                  }}
                   className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-sky-600 to-teal-600 px-6 text-sm font-semibold text-white shadow-lg shadow-sky-900/20 transition hover:from-sky-500 hover:to-teal-500 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
                 >
                   {plan.isPending && <Spinner className="h-4 w-4 text-white" />}
@@ -938,6 +968,31 @@ export default function App() {
                   {plan.error instanceof Error ? plan.error.message : 'Request failed'}
                 </p>
               )}
+              {plan.isError && lastErrorDetail && (
+                <details className="mt-3 rounded-xl border border-rose-200/90 bg-white px-4 py-3 text-xs text-rose-900">
+                  <summary className="cursor-pointer font-medium">Show technical error detail</summary>
+                  <pre className="mt-2 overflow-auto whitespace-pre-wrap rounded-lg bg-rose-50 p-3 text-[11px] leading-relaxed">
+                    {lastErrorDetail}
+                  </pre>
+                </details>
+              )}
+              <details className="mt-3 rounded-xl border border-slate-200/90 bg-white px-4 py-3 text-xs text-slate-700">
+                <summary className="cursor-pointer font-medium">Show client debug info</summary>
+                <div className="mt-2 grid gap-2 text-[11px] leading-relaxed">
+                  <p>
+                    <span className="font-medium text-slate-800">Browser online:</span>{' '}
+                    {isBrowserOnline ? 'yes' : 'no'}
+                  </p>
+                  <p>
+                    <span className="font-medium text-slate-800">Last request at:</span>{' '}
+                    {lastRequestAt || 'N/A'}
+                  </p>
+                  <p className="break-all">
+                    <span className="font-medium text-slate-800">API base:</span>{' '}
+                    {lastRequestApiBase || 'N/A'}
+                  </p>
+                </div>
+              </details>
             </section>
 
             {plan.isSuccess && (
