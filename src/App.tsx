@@ -1,7 +1,7 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { fetchAgents, fetchHealth, fetchVersion, fetchWorkflowSteps, runPlanStream } from './lib/api'
-import type { PlanResponse, WorkflowStepItem } from './types/api'
+import type { AgentInfoItem, PlanResponse, WorkflowStepItem } from './types/api'
 
 function Spinner({ className = '' }: { className?: string }) {
   return (
@@ -156,6 +156,215 @@ function diningFromPlan(diningList: PlanResponse['dining_list']): DiningPreview[
     .filter((r) => r.name)
 }
 
+type ItineraryDayCard = {
+  key: string
+  title: string
+  bullets: string[]
+  mealsLine: string | null
+  stayLine: string | null
+  note: string | null
+}
+
+function formatActivityLine(act: Record<string, unknown>): string {
+  const t = String(act.time ?? '').trim()
+  const n = String(act.name ?? '').trim()
+  const loc = String(act.location ?? '').trim()
+  if (!n) return ''
+  let s = t ? `${t} · ${n}` : n
+  if (loc && loc.toUpperCase() !== 'TBD') {
+    const shortLoc = loc.length > 48 ? `${loc.slice(0, 45)}…` : loc
+    s += ` — ${shortLoc}`
+  }
+  return s
+}
+
+function itineraryDayCardsFromApi(result: PlanResponse): ItineraryDayCard[] | null {
+  const itin = result.itinerary as { days?: Record<string, unknown>[] } | null | undefined
+  if (itin?.days && Array.isArray(itin.days) && itin.days.length > 0) {
+    return itin.days.map((day, i) => {
+      const activities = (day.activities as unknown[]) ?? []
+      const bullets = activities
+        .filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null)
+        .map((a) => formatActivityLine(a))
+        .filter(Boolean)
+      const meals = day.meals as Record<string, string> | undefined
+      let mealsLine: string | null = null
+      if (meals && typeof meals === 'object') {
+        const parts = (['breakfast', 'lunch', 'dinner'] as const)
+          .map((k) => {
+            const v = String(meals[k] ?? '').trim()
+            return v && v.toUpperCase() !== 'TBD' ? `${k}: ${v}` : ''
+          })
+          .filter(Boolean)
+        if (parts.length) mealsLine = parts.join(' · ')
+      }
+      const acc = day.accommodation as Record<string, unknown> | null | undefined
+      let stayLine: string | null = null
+      if (acc && typeof acc === 'object') {
+        const name = String(acc.name ?? '').trim()
+        if (name && name.toUpperCase() !== 'TBD') stayLine = name
+      }
+      const noteRaw = String(day.notes ?? '').trim()
+      const note = noteRaw && noteRaw.toUpperCase() !== 'TBD' ? noteRaw : null
+      const dn = typeof day.day_number === 'number' ? day.day_number : i + 1
+      const dt = String(day.date ?? '').trim()
+      return {
+        key: `day-${dn}-${i}`,
+        title: `Day ${dn}` + (dt ? ` (${dt})` : ''),
+        bullets,
+        mealsLine,
+        stayLine,
+        note,
+      }
+    })
+  }
+  return itineraryDayCardsFromNarrative(result.itinerary_narrative)
+}
+
+function itineraryDayCardsFromNarrative(nar: string | null | undefined): ItineraryDayCard[] | null {
+  if (!nar?.trim()) return null
+  const blocks = nar.trim().split(/\n\n+/)
+  const cards: ItineraryDayCard[] = []
+  for (const block of blocks) {
+    const lines = block
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+    const first = lines[0] ?? ''
+    if (!/^Day\s+\d+/i.test(first)) continue
+    const bullets: string[] = []
+    let mealsLine: string | null = null
+    let stayLine: string | null = null
+    let note: string | null = null
+    for (const line of lines.slice(1)) {
+      if (line.startsWith('•') || line.startsWith('-')) {
+        bullets.push(line.replace(/^[•\-]\s*/, ''))
+      } else if (/^meals:/i.test(line)) {
+        mealsLine = line
+      } else if (/^stay:/i.test(line)) {
+        stayLine = line.replace(/^stay:\s*/i, '').trim()
+      } else if (!/^here is your day-by-day plan/i.test(line)) {
+        note = note ? `${note} ${line}` : line
+      }
+    }
+    cards.push({
+      key: `nar-${cards.length}-${first.slice(0, 24)}`,
+      title: first,
+      bullets,
+      mealsLine,
+      stayLine,
+      note,
+    })
+  }
+  return cards.length ? cards : null
+}
+
+function SpecialistsHelpPopover({
+  open,
+  onClose,
+  loading,
+  error,
+  agents,
+  anchorRef,
+}: {
+  open: boolean
+  onClose: () => void
+  loading: boolean
+  error: boolean
+  agents: AgentInfoItem[] | undefined
+  anchorRef: RefObject<HTMLElement | null>
+}) {
+  const panelRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (panelRef.current?.contains(t)) return
+      if (anchorRef.current?.contains(t)) return
+      onClose()
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [open, onClose, anchorRef])
+
+  if (!open) return null
+
+  return (
+    <div
+      ref={panelRef}
+      role="dialog"
+      aria-label="How Voyagent works"
+      className="absolute right-0 top-full z-50 mt-2 w-[min(100vw-2rem,22rem)] origin-top-right rounded-2xl border border-amber-200/90 bg-amber-50/95 p-4 text-left shadow-xl shadow-amber-900/10 ring-1 ring-amber-100/80 backdrop-blur-sm"
+    >
+      <div className="absolute -top-1.5 right-4 h-3 w-3 rotate-45 border-l border-t border-amber-200/90 bg-amber-50/95" aria-hidden />
+      <p className="pr-6 font-outfit text-sm font-semibold text-amber-950">Specialists on your trip</p>
+      <p className="mt-1 text-xs leading-snug text-amber-900/85">
+        Five agents run in order; each step feeds the next. Expand a day in your handbook to read details without long
+        scrolling.
+      </p>
+      <div className="mt-3 max-h-64 space-y-2 overflow-y-auto pr-1 text-xs">
+        {loading && <p className="text-amber-800/80">Loading…</p>}
+        {error && <p className="text-rose-700">Could not load agent list.</p>}
+        {agents?.map((a, idx) => (
+          <div key={a.name} className="rounded-xl border border-amber-100/80 bg-white/90 px-3 py-2 shadow-sm">
+            <p className="font-semibold text-slate-900">
+              {idx + 1}. {a.name}
+            </p>
+            <p className="mt-0.5 leading-snug text-slate-600">{a.description}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function DayAccordionItem({ day, defaultExpanded }: { day: ItineraryDayCard; defaultExpanded: boolean }) {
+  const [open, setOpen] = useState(defaultExpanded)
+  return (
+    <details
+      className="group self-start rounded-2xl border border-slate-200/90 bg-white/95 shadow-sm ring-1 ring-slate-100/80 open:shadow-md open:ring-sky-200/40"
+      open={open}
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+    >
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 rounded-2xl px-4 py-3 marker:content-none [&::-webkit-details-marker]:hidden">
+        <span className="font-outfit text-sm font-semibold text-slate-900">{day.title}</span>
+        <span className="shrink-0 text-[11px] font-medium tabular-nums text-slate-500">
+          {day.bullets.length} stops
+          <span className="ml-1 text-slate-400 group-open:rotate-180 transition-transform">▼</span>
+        </span>
+      </summary>
+      <div className="border-t border-slate-100 px-4 py-3 text-sm text-slate-700">
+        {day.bullets.length > 0 ? (
+          <ul className="space-y-2">
+            {day.bullets.map((b, bi) => (
+              <li key={`${day.key}-b-${bi}`} className="flex gap-2 text-xs leading-relaxed sm:text-sm">
+                <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400" aria-hidden />
+                <span>{b}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-xs text-slate-500">No timed stops listed for this day.</p>
+        )}
+        {day.mealsLine ? <p className="mt-3 text-xs font-medium text-amber-900/90">{day.mealsLine}</p> : null}
+        {day.stayLine ? <p className="mt-2 text-xs text-slate-600">Stay: {day.stayLine}</p> : null}
+        {day.note ? <p className="mt-2 text-xs italic text-slate-500">{day.note}</p> : null}
+      </div>
+    </details>
+  )
+}
+
+function ItineraryDayAccordion({ days }: { days: ItineraryDayCard[] }) {
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 sm:items-start">
+      {days.map((day, idx) => (
+        <DayAccordionItem key={day.key} day={day} defaultExpanded={idx === 0} />
+      ))}
+    </div>
+  )
+}
+
 function HandbookSummaryCard({ data }: { data: Record<string, unknown> }) {
   const dest = String(data.destination ?? '—')
   const title = String(data.title ?? 'Your handbook')
@@ -196,6 +405,7 @@ function HandbookSummaryCard({ data }: { data: Record<string, unknown> }) {
 
 function HandbookCardView({ result }: { result: PlanResponse }) {
   const summary = result.final_handbook_summary as Record<string, unknown> | null | undefined
+  const dayCards = useMemo(() => itineraryDayCardsFromApi(result), [result])
   const spots = useMemo(() => spotsFromPlan(result.spot_list), [result.spot_list])
   const dining = useMemo(() => diningFromPlan(result.dining_list), [result.dining_list])
   const handbook = result.final_handbook as Record<string, unknown> | null | undefined
@@ -224,7 +434,13 @@ function HandbookCardView({ result }: { result: PlanResponse }) {
       })
       .filter((r) => r.suggestion)
   }, [handbook])
-  const narrative = result.itinerary_narrative?.trim()
+  const locationHint = (() => {
+    const itin = result.itinerary as { location?: string } | null | undefined
+    if (itin?.location && String(itin.location).trim()) return String(itin.location)
+    const s = summary as { destination?: string } | undefined
+    if (s?.destination) return String(s.destination)
+    return ''
+  })()
 
   return (
     <div className="overflow-hidden rounded-3xl border border-slate-200/90 bg-gradient-to-b from-white via-white to-slate-50/90 shadow-xl shadow-slate-900/10 ring-1 ring-slate-100">
@@ -232,110 +448,121 @@ function HandbookCardView({ result }: { result: PlanResponse }) {
         <p className="text-xs font-semibold uppercase tracking-widest text-sky-800/80">Your travel handbook</p>
         <h3 className="mt-1 font-outfit text-2xl font-semibold tracking-tight text-slate-900">Curated for this trip</h3>
         <p className="mt-1 max-w-2xl text-sm text-slate-600">
-          A readable snapshot of the plan — structured data stays available under Developer view.
+          Day-by-day details fold into cards so you scan faster. Raw JSON stays under Developer.
         </p>
       </div>
 
       <div className="space-y-8 px-6 py-8 sm:px-8">
-        {summary && Object.keys(summary).length > 0 && <HandbookSummaryCard data={summary} />}
+        <div className="grid gap-8 xl:grid-cols-12">
+          <div className="space-y-8 xl:col-span-7">
+            {summary && Object.keys(summary).length > 0 && <HandbookSummaryCard data={summary} />}
 
-        {narrative && (
-          <section>
-            <h4 className="font-outfit text-sm font-semibold uppercase tracking-wider text-slate-500">Itinerary</h4>
-            <div className="mt-3 rounded-2xl border border-slate-100 bg-white/90 p-5 text-sm leading-relaxed text-slate-800 shadow-sm ring-1 ring-slate-100/80">
-              <div className="whitespace-pre-wrap font-serif text-[15px] leading-7 text-slate-800">{narrative}</div>
-            </div>
-          </section>
-        )}
-
-        {spots.length > 0 && (
-          <section>
-            <h4 className="font-outfit text-sm font-semibold uppercase tracking-wider text-slate-500">Featured places</h4>
-            <div className="mt-3 flex gap-3 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-              {spots.map((s) => (
-                <article
-                  key={s.name}
-                  className="min-w-[220px] max-w-[260px] shrink-0 rounded-2xl border border-slate-100 bg-white p-4 shadow-sm ring-1 ring-slate-50"
-                >
-                  <p className="text-[10px] font-semibold uppercase tracking-wider text-teal-700/90">{s.category || 'Spot'}</p>
-                  <p className="mt-1 font-medium text-slate-900">{s.name}</p>
-                  <p className="mt-1 line-clamp-3 text-xs leading-snug text-slate-600">{s.description}</p>
-                  {s.location ? <p className="mt-2 text-xs text-slate-500">{s.location}</p> : null}
-                </article>
-              ))}
-            </div>
-          </section>
-        )}
-
-        {dining.length > 0 && (
-          <section>
-            <h4 className="font-outfit text-sm font-semibold uppercase tracking-wider text-slate-500">Dining</h4>
-            <ul className="mt-3 grid gap-3 sm:grid-cols-2">
-              {dining.map((d) => (
-                <li
-                  key={d.name}
-                  className="rounded-2xl border border-amber-100/90 bg-amber-50/40 px-4 py-3 ring-1 ring-amber-100/60"
-                >
-                  <p className="font-medium text-slate-900">{d.name}</p>
-                  <p className="mt-1 text-xs text-slate-600">
-                    {d.cuisine_type}
-                    {d.price_range ? ` · ${d.price_range}` : ''}
-                  </p>
-                  {d.location ? <p className="mt-1 text-xs text-slate-500">{d.location}</p> : null}
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-
-        {optimizations.length > 0 && (
-          <section>
-            <h4 className="font-outfit text-sm font-semibold uppercase tracking-wider text-slate-500">Budget ideas</h4>
-            <ul className="mt-3 space-y-2">
-              {optimizations.map((o, i) => (
-                <li key={i} className="rounded-xl border border-slate-100 bg-slate-50/80 px-4 py-3 text-sm text-slate-800">
-                  <span className="font-medium text-slate-900">{o.category}</span>
-                  <span className="text-slate-600"> — {o.suggestion}</span>
-                  {Number.isFinite(o.savings) ? (
-                    <span className="mt-1 block text-xs font-medium text-teal-800">
-                      Potential savings ~${o.savings.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                    </span>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-
-        {(tips.length > 0 || packing.length > 0) && (
-          <section className="grid gap-6 sm:grid-cols-2">
-            {tips.length > 0 && (
-              <div>
-                <h4 className="font-outfit text-sm font-semibold uppercase tracking-wider text-slate-500">Tips</h4>
-                <ul className="mt-3 list-inside list-disc space-y-1.5 text-sm text-slate-700">
-                  {tips.map((t) => (
-                    <li key={t}>{t}</li>
-                  ))}
-                </ul>
-              </div>
+            {dayCards && dayCards.length > 0 && (
+              <section>
+                <h4 className="font-outfit text-sm font-semibold uppercase tracking-wider text-slate-500">Itinerary</h4>
+                {locationHint ? (
+                  <p className="mt-2 text-xs text-slate-600">Day-by-day plan for {locationHint}. Tap a day to expand.</p>
+                ) : (
+                  <p className="mt-2 text-xs text-slate-600">Tap a day to expand stops and meals.</p>
+                )}
+                <div className="mt-4">
+                  <ItineraryDayAccordion days={dayCards} />
+                </div>
+              </section>
             )}
-            {packing.length > 0 && (
-              <div>
-                <h4 className="font-outfit text-sm font-semibold uppercase tracking-wider text-slate-500">Packing ideas</h4>
-                <ul className="mt-3 flex flex-wrap gap-2">
-                  {packing.map((p) => (
-                    <li
-                      key={p}
-                      className="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-200/80"
+          </div>
+
+          <div className="space-y-8 xl:col-span-5">
+            {spots.length > 0 && (
+              <section>
+                <h4 className="font-outfit text-sm font-semibold uppercase tracking-wider text-slate-500">Featured places</h4>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                  {spots.map((s) => (
+                    <article
+                      key={s.name}
+                      className="rounded-2xl border border-slate-100 bg-white p-4 shadow-sm ring-1 ring-slate-50"
                     >
-                      {p}
+                      <p className="text-[10px] font-semibold uppercase tracking-wider text-teal-700/90">{s.category || 'Spot'}</p>
+                      <p className="mt-1 font-medium text-slate-900">{s.name}</p>
+                      <p className="mt-1 line-clamp-3 text-xs leading-snug text-slate-600">{s.description}</p>
+                      {s.location ? <p className="mt-2 text-xs text-slate-500 line-clamp-2">{s.location}</p> : null}
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {dining.length > 0 && (
+              <section>
+                <h4 className="font-outfit text-sm font-semibold uppercase tracking-wider text-slate-500">Dining</h4>
+                <ul className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                  {dining.map((d) => (
+                    <li
+                      key={d.name}
+                      className="rounded-2xl border border-amber-100/90 bg-amber-50/40 px-4 py-3 ring-1 ring-amber-100/60"
+                    >
+                      <p className="font-medium text-slate-900">{d.name}</p>
+                      <p className="mt-1 text-xs text-slate-600">
+                        {d.cuisine_type}
+                        {d.price_range ? ` · ${d.price_range}` : ''}
+                      </p>
+                      {d.location ? <p className="mt-1 text-xs text-slate-500 line-clamp-2">{d.location}</p> : null}
                     </li>
                   ))}
                 </ul>
-              </div>
+              </section>
             )}
-          </section>
-        )}
+
+            {optimizations.length > 0 && (
+              <section>
+                <h4 className="font-outfit text-sm font-semibold uppercase tracking-wider text-slate-500">Budget ideas</h4>
+                <ul className="mt-3 space-y-2">
+                  {optimizations.map((o, i) => (
+                    <li key={i} className="rounded-xl border border-slate-100 bg-slate-50/80 px-4 py-3 text-sm text-slate-800">
+                      <span className="font-medium text-slate-900">{o.category}</span>
+                      <span className="text-slate-600"> — {o.suggestion}</span>
+                      {Number.isFinite(o.savings) ? (
+                        <span className="mt-1 block text-xs font-medium text-teal-800">
+                          Potential savings ~${o.savings.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                        </span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+
+            {(tips.length > 0 || packing.length > 0) && (
+              <section className="grid gap-6 sm:grid-cols-2 xl:grid-cols-1">
+                {tips.length > 0 && (
+                  <div>
+                    <h4 className="font-outfit text-sm font-semibold uppercase tracking-wider text-slate-500">Tips</h4>
+                    <ul className="mt-3 list-inside list-disc space-y-1.5 text-sm text-slate-700">
+                      {tips.map((t) => (
+                        <li key={t}>{t}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {packing.length > 0 && (
+                  <div>
+                    <h4 className="font-outfit text-sm font-semibold uppercase tracking-wider text-slate-500">Packing ideas</h4>
+                    <ul className="mt-3 flex flex-wrap gap-2">
+                      {packing.map((p) => (
+                        <li
+                          key={p}
+                          className="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-200/80"
+                        >
+                          {p}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </section>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   )
@@ -402,6 +629,8 @@ function ResultView({ result }: { result: PlanResponse }) {
 export default function App() {
   const [input, setInput] = useState('')
   const [pipe, setPipe] = useState({ doneIdx: 0, runningIdx: 0, label: '' })
+  const [specialistsHelpOpen, setSpecialistsHelpOpen] = useState(false)
+  const specialistsHelpBtnRef = useRef<HTMLButtonElement>(null)
 
   const health = useQuery({ queryKey: ['health'], queryFn: fetchHealth })
   const version = useQuery({ queryKey: ['version'], queryFn: fetchVersion })
@@ -505,8 +734,8 @@ export default function App() {
       </div>
 
       <main className="mx-auto max-w-6xl px-4 py-10 sm:px-6 lg:px-8 lg:py-12">
-        <div className="grid gap-10 lg:grid-cols-12 lg:gap-12">
-          <div className="lg:col-span-7">
+        <div className="w-full">
+          <div>
             <section className="rounded-3xl border border-slate-200/90 bg-white p-6 shadow-xl shadow-slate-900/5 sm:p-8">
               <PipelineProgressBar
                 steps={pipelineSteps}
@@ -516,11 +745,32 @@ export default function App() {
                 statusLabel={pipe.label}
               />
               <div className="flex items-start justify-between gap-4">
-                <div>
+                <div className="min-w-0 flex-1">
                   <h2 className="font-outfit text-xl font-semibold text-slate-900">Describe your trip</h2>
                   <p className="mt-1 text-sm text-slate-600">
                     Destination, dates, budget, party size, pace, and any dietary or mobility needs.
                   </p>
+                </div>
+                <div className="relative shrink-0 pt-0.5">
+                  <button
+                    ref={specialistsHelpBtnRef}
+                    type="button"
+                    onClick={() => setSpecialistsHelpOpen((o) => !o)}
+                    className="flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-white text-sm font-bold text-slate-600 shadow-sm ring-slate-100 transition hover:border-sky-300 hover:bg-sky-50 hover:text-sky-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/40"
+                    aria-expanded={specialistsHelpOpen}
+                    aria-label="How Voyagent specialists work"
+                    title="How Voyagent specialists work"
+                  >
+                    ?
+                  </button>
+                  <SpecialistsHelpPopover
+                    open={specialistsHelpOpen}
+                    onClose={() => setSpecialistsHelpOpen(false)}
+                    loading={agents.isLoading}
+                    error={agents.isError}
+                    agents={agents.data?.agents}
+                    anchorRef={specialistsHelpBtnRef}
+                  />
                 </div>
               </div>
               <label htmlFor="trip-input" className="sr-only">
@@ -557,41 +807,15 @@ export default function App() {
             {plan.isSuccess && (
               <section className="mt-10">
                 <h2 className="font-outfit text-xl font-semibold text-slate-900">Your results</h2>
-                <p className="mt-1 text-sm text-slate-600">Review the summary, then expand sections for full detail.</p>
+                <p className="mt-1 text-sm text-slate-600">
+                  Overview and day cards use the full width; tap the ? above for specialist notes.
+                </p>
                 <div className="mt-6">
                   <ResultView result={plan.data} />
                 </div>
               </section>
             )}
           </div>
-
-          <aside className="space-y-6 lg:col-span-5">
-            <section className="rounded-3xl border border-slate-200/90 bg-white p-6 shadow-lg shadow-slate-900/5">
-              <h2 className="font-outfit text-lg font-semibold text-slate-900">Specialists on your trip</h2>
-              <p className="mt-1 text-xs text-slate-500">Purpose-built agents behind every section.</p>
-              {agents.isLoading && (
-                <div className="mt-4 space-y-3">
-                  {[1, 2, 3].map((i) => (
-                    <div key={i} className="h-16 animate-pulse rounded-xl bg-slate-100" />
-                  ))}
-                </div>
-              )}
-              {agents.isError && <p className="mt-4 text-sm text-rose-600">Could not load agents.</p>}
-              {agents.isSuccess && (
-                <ul className="mt-4 space-y-3">
-                  {agents.data.agents.map((a) => (
-                    <li
-                      key={a.name}
-                      className="rounded-2xl border border-slate-100 bg-slate-50/80 px-4 py-3 transition hover:border-sky-200/80 hover:bg-white"
-                    >
-                      <p className="text-sm font-semibold text-slate-900">{a.name}</p>
-                      <p className="mt-1 text-xs leading-snug text-slate-600">{a.description}</p>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-          </aside>
         </div>
       </main>
 
